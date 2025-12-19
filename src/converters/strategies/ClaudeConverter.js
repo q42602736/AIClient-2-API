@@ -813,17 +813,20 @@ export class ClaudeConverter extends BaseConverter {
                         return null;
                     }
 
-                    delete tool.input_schema.$schema;
+                    // 清理 input_schema，移除 Gemini 不支持的字段（如 multipleOf, minLength, maxLength 等）
+                    let cleanedSchema = { type: 'object', properties: {} };
+                    if (tool.input_schema && typeof tool.input_schema === 'object') {
+                        cleanedSchema = cleanJsonSchema(tool.input_schema);
+                    }
+
                     return {
                         name: String(tool.name),
                         description: String(tool.description || ''),
-                        parameters: tool.input_schema && typeof tool.input_schema === 'object' 
-                            ? tool.input_schema 
-                            : { type: 'object', properties: {} }
+                        parameters: cleanedSchema
                     };
                 }).filter(Boolean)
             }];
-            
+
             if (geminiRequest.tools[0].functionDeclarations.length === 0) {
                 delete geminiRequest.tools;
             }

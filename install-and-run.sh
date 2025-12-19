@@ -85,8 +85,8 @@ echo "========================================"
 echo "  启动AI Client 2 API服务器..."
 echo "========================================"
 echo
-echo "🌐 服务器将在 http://localhost:3000 启动"
-echo "📖 访问 http://localhost:3000 查看管理界面"
+echo "🌐 服务器将在 http://localhost:12521 启动"
+echo "📖 访问 http://localhost:12521 查看管理界面"
 echo "⏹️  按 Ctrl+C 停止服务器"
 echo
 

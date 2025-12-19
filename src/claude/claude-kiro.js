@@ -1514,28 +1514,177 @@ async initializeAuth(forceRefresh = false) {
     estimateInputTokens(requestBody) {
         let totalTokens = 0;
         
+        // 基础请求开销 (API格式固定开销)
+        const BASE_REQUEST_OVERHEAD = 4;
+        totalTokens += BASE_REQUEST_OVERHEAD;
+        
         // Count system prompt tokens
         if (requestBody.system) {
             const systemText = this.getContentText(requestBody.system);
             totalTokens += this.countTextTokens(systemText);
+            // 系统提示固定开销
+            totalTokens += 2;
         }
         
         // Count all messages tokens
         if (requestBody.messages && Array.isArray(requestBody.messages)) {
             for (const message of requestBody.messages) {
+                // 消息结构开销 (role + JSON结构 + 分隔符)
+                // 参考 KiroGate: ~4 tokens 服务信息 + ~3 tokens 最终服务
+                const MESSAGE_OVERHEAD = 4;
+                totalTokens += MESSAGE_OVERHEAD;
+                
+                // role 字段 token (~1 token)
+                totalTokens += 1;
+                
                 if (message.content) {
-                    const contentText = this.getContentText(message);
-                    totalTokens += this.countTextTokens(contentText);
+                    // 计算消息内容 tokens (包括 text, image, tool_use, tool_result)
+                    totalTokens += this.estimateContentTokens(message.content);
+                }
+                
+                // 处理 tool_calls (assistant 消息中可能包含)
+                if (message.tool_calls && Array.isArray(message.tool_calls)) {
+                    for (const tc of message.tool_calls) {
+                        // tool_call 结构开销
+                        totalTokens += 4;
+                        if (tc.function) {
+                            totalTokens += this.countTextTokens(tc.function.name || '');
+                            totalTokens += this.countTextTokens(tc.function.arguments || '');
+                        }
+                    }
                 }
             }
         }
         
         // Count tools definitions tokens if present
         if (requestBody.tools && Array.isArray(requestBody.tools)) {
-            totalTokens += this.countTextTokens(JSON.stringify(requestBody.tools));
+            const toolCount = requestBody.tools.length;
+            
+            // 工具基础开销 (参考 kiro2api 自适应策略)
+            let baseToolsOverhead = 0;
+            let perToolOverhead = 0;
+            
+            if (toolCount === 1) {
+                baseToolsOverhead = 0;
+                perToolOverhead = 50;
+            } else if (toolCount <= 5) {
+                baseToolsOverhead = 100;
+                perToolOverhead = 30;
+            } else {
+                baseToolsOverhead = 180;
+                perToolOverhead = 20;
+            }
+            
+            totalTokens += baseToolsOverhead;
+            
+            for (const tool of requestBody.tools) {
+                // 工具名称
+                totalTokens += this.countTextTokens(tool.name || '');
+                // 工具描述
+                totalTokens += this.countTextTokens(tool.description || '');
+                // 工具 schema
+                if (tool.input_schema) {
+                    totalTokens += this.countTextTokens(JSON.stringify(tool.input_schema));
+                }
+                totalTokens += perToolOverhead;
+            }
         }
         
         return totalTokens;
+    }
+
+    /**
+     * Estimate tokens for message content (supports text, image, tool_use, tool_result)
+     * 参考 KiroGate 和 kiro2api 的实现
+     */
+    estimateContentTokens(content) {
+        // 图片 token 估算值 (参考 kiro2api: 1500, KiroGate: 100)
+        // 使用中间值，实际取决于图片大小和细节级别
+        const IMAGE_TOKENS = 1500;
+        
+        if (!content) return 0;
+        
+        // 字符串内容
+        if (typeof content === 'string') {
+            return this.countTextTokens(content);
+        }
+        
+        // 数组内容 (多个 content blocks)
+        if (Array.isArray(content)) {
+            let totalTokens = 0;
+            
+            for (const block of content) {
+                if (!block || typeof block !== 'object') continue;
+                
+                switch (block.type) {
+                    case 'text':
+                        if (block.text) {
+                            totalTokens += this.countTextTokens(block.text);
+                        }
+                        break;
+                        
+                    case 'image':
+                        // 图片固定估算
+                        totalTokens += IMAGE_TOKENS;
+                        break;
+                        
+                    case 'image_url':
+                        // OpenAI 格式的图片
+                        totalTokens += IMAGE_TOKENS;
+                        break;
+                        
+                    case 'tool_use':
+                        // 工具调用 (assistant 消息中)
+                        totalTokens += 4; // 结构开销
+                        if (block.name) {
+                            totalTokens += this.countTextTokens(block.name);
+                        }
+                        if (block.input) {
+                            const inputStr = typeof block.input === 'string' 
+                                ? block.input 
+                                : JSON.stringify(block.input);
+                            totalTokens += this.countTextTokens(inputStr);
+                        }
+                        break;
+                        
+                    case 'tool_result':
+                        // 工具结果 (user 消息中)
+                        totalTokens += 4; // 结构开销
+                        if (block.tool_use_id) {
+                            totalTokens += this.countTextTokens(block.tool_use_id);
+                        }
+                        // 递归处理 tool_result 的 content
+                        if (block.content) {
+                            totalTokens += this.estimateContentTokens(block.content);
+                        }
+                        break;
+                        
+                    case 'thinking':
+                        // thinking 内容
+                        if (block.thinking) {
+                            totalTokens += this.countTextTokens(block.thinking);
+                        }
+                        break;
+                        
+                    default:
+                        // 未知类型，尝试序列化估算
+                        try {
+                            totalTokens += this.countTextTokens(JSON.stringify(block));
+                        } catch (e) {
+                            totalTokens += 10; // 保守估算
+                        }
+                }
+            }
+            
+            return totalTokens;
+        }
+        
+        // 对象内容 (单个 content block)
+        if (typeof content === 'object') {
+            return this.estimateContentTokens([content]);
+        }
+        
+        return 0;
     }
 
     /**
